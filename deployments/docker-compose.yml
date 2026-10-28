@@ -1,0 +1,122 @@
+services:
+  # -------------------------------------------------------------
+  # INFRASTRUCTURE
+  # -------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: wallet_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: wallet_ledger
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/000001_init_schema.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wallet_ledger"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: wallet_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: wallet_nats
+    command: ["-js"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: wallet_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployments/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  # -------------------------------------------------------------
+  # MICROSERVICES
+  # -------------------------------------------------------------
+  risk-service:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.risk
+    container_name: wallet_risk_service
+    environment:
+      GRPC_PORT: "50051"
+    ports:
+      - "50051:50051"
+
+  api-service:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.api
+    container_name: wallet_api_service
+    environment:
+      PORT: "8080"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "postgres"
+      DB_PASSWORD: "postgrespassword"
+      DB_NAME: "wallet_ledger"
+      REDIS_ADDR: "redis:6379"
+      JWT_SECRET: "development-production-ready-secret-jwt-key"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  saga-orchestrator:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.saga
+    container_name: wallet_saga_orchestrator
+    environment:
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "postgres"
+      DB_PASSWORD: "postgrespassword"
+      DB_NAME: "wallet_ledger"
+      NATS_URL: "nats://nats:4222"
+      RISK_SERVICE_ADDR: "risk-service:50051"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_started
+      risk-service:
+        condition: service_started
+
+  reconciliation:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile.reconciliation
+    container_name: wallet_reconciliation
+    environment:
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "postgres"
+      DB_PASSWORD: "postgrespassword"
+      DB_NAME: "wallet_ledger"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
