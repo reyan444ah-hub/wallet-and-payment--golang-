@@ -8,14 +8,14 @@ import (
 )
 
 var (
-	ErrCurrencyMismatch     = errors.New("currencies do not match")
-	ErrInvalidAmount        = errors.New("amount must be strictly positive")
-	ErrInsufficientBalance  = errors.New("insufficient available balance in wallet")
-	ErrSelfTransfer         = errors.New("cannot transfer money to the same wallet")
-	ErrUnbalancedJournal    = errors.New("journal entries do not balance: sum of debits must equal sum of credits")
-	ErrInvalidDirection     = errors.New("direction must be DR (Debit) or CR (Credit)")
-	ErrUnsupportedCurrency  = errors.New("unsupported currency: only USD and EUR allowed")
-	ErrWalletSuspended      = errors.New("wallet is not active")
+	ErrCurrencyMismatch    = errors.New("currencies do not match")
+	ErrInvalidAmount       = errors.New("amount must be strictly positive")
+	ErrInsufficientBalance = errors.New("insufficient available balance in wallet")
+	ErrSelfTransfer        = errors.New("cannot transfer money to the same wallet")
+	ErrUnbalancedJournal   = errors.New("journal entries do not balance: sum of debits must equal sum of credits")
+	ErrInvalidDirection    = errors.New("direction must be DR (Debit) or CR (Credit)")
+	ErrUnsupportedCurrency = errors.New("unsupported currency: only USD and EUR allowed")
+	ErrWalletSuspended     = errors.New("wallet is not active")
 )
 
 type Direction string

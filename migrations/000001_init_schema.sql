@@ -192,7 +192,7 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     topic VARCHAR(255) NOT NULL,
     partition_key VARCHAR(255) NOT NULL, -- e.g. wallet_id for ordering
     payload JSONB NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PUBLISHED', 'FAILED', 'DEAD_LETTER')),
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'PUBLISHED', 'FAILED', 'DEAD_LETTER')),
     retry_count INT NOT NULL DEFAULT 0,
     last_error TEXT,
     next_retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -230,11 +230,11 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
     response_status INT,
     error_message TEXT,
     attempt INT NOT NULL DEFAULT 1,
-    status VARCHAR(50) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'SUCCESS', 'FAILED')),
+    status VARCHAR(50) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'SUCCESS', 'FAILED')),
     next_retry_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_pending ON webhook_deliveries(status, next_retry_at) WHERE status = 'PENDING';
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_pending ON webhook_deliveries(status, next_retry_at) WHERE status IN ('PENDING', 'PROCESSING');
 
 -- -------------------------------------------------------------
 -- 8. RECONCILIATION RUNS & AUDIT DISCREPANCIES

@@ -62,7 +62,10 @@ func main() {
 	// Metrics
 	metrics := telemetry.InitMetrics("wallet_platform")
 
-	jwtSecret := getEnv("JWT_SECRET", "super-secret-production-grade-key-1234567890")
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		logger.Fatal("JWT_SECRET environment variable is required and must not be empty")
+	}
 	server := api.NewServer(pool, limiter, metrics, logger, jwtSecret)
 
 	port := getEnv("PORT", "8080")

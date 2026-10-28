@@ -47,6 +47,24 @@ func NewOrchestrator(
 func (o *Orchestrator) StartConsumer(ctx context.Context) error {
 	// Durable push consumer on transfers stream
 	sub, err := o.js.Subscribe("transfer.created.*", func(msg *nats.Msg) {
+		msgID := msg.Header.Get("Nats-Msg-Id")
+		if msgID == "" {
+			msgID = string(msg.Data)
+		}
+
+		// Check inbox deduplication
+		tx, err := o.db.Begin(ctx)
+		if err == nil {
+			dedupErr := o.inbox.CheckAndRecordInTx(ctx, tx, msgID, "saga_orchestrator")
+			if dedupErr == inbox.ErrDuplicateMessage {
+				_ = tx.Rollback(ctx)
+				o.logger.Info("ignoring duplicate message in saga orchestrator", zap.String("msg_id", msgID))
+				_ = msg.Ack()
+				return
+			}
+			_ = tx.Commit(ctx)
+		}
+
 		transferIDStr := string(msg.Data)
 		transferID, parseErr := uuid.Parse(transferIDStr)
 		if parseErr != nil {
@@ -55,7 +73,7 @@ func (o *Orchestrator) StartConsumer(ctx context.Context) error {
 			return
 		}
 
-		err := o.ExecuteSaga(ctx, transferID)
+		err = o.ExecuteSaga(ctx, transferID)
 		if err != nil {
 			o.logger.Error("saga execution error", zap.String("transfer_id", transferID.String()), zap.Error(err))
 			// JetStream will redeliver according to policy
@@ -114,6 +132,7 @@ func (o *Orchestrator) ExecuteSaga(ctx context.Context, transferID uuid.UUID) er
 			return err
 		}
 		transfer.SagaStep = domain.StepPostLedger
+		transfer.FencingToken++
 	}
 
 	// Step 3: Post Double-Entry Ledger Entries atomically
@@ -127,6 +146,7 @@ func (o *Orchestrator) ExecuteSaga(ctx context.Context, transferID uuid.UUID) er
 			return err
 		}
 		transfer.SagaStep = domain.StepReleaseHold
+		transfer.FencingToken++
 	}
 
 	// Step 4: Release hold and mark completed
@@ -134,6 +154,7 @@ func (o *Orchestrator) ExecuteSaga(ctx context.Context, transferID uuid.UUID) er
 		if err := o.finalizeTransfer(ctx, transfer); err != nil {
 			return err
 		}
+		transfer.FencingToken++
 	}
 
 	// Step 5: Webhook delivery
@@ -212,6 +233,18 @@ func (o *Orchestrator) postDoubleEntryLedger(ctx context.Context, t *domain.Tran
 		if err != nil {
 			return fmt.Errorf("failed to ensure fee wallet: %w", err)
 		}
+	}
+
+	// Idempotency check: if journal entry already exists for this transfer, skip re-posting
+	var existingJournalID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT id FROM journal_entries 
+		WHERE reference_id = $1 AND reference_type = 'transfer'
+		LIMIT 1
+	`, t.ID).Scan(&existingJournalID)
+	if err == nil {
+		// Journal already created on previous attempt; commit and return nil
+		return tx.Commit(ctx)
 	}
 
 	// 1. Create Journal Entry

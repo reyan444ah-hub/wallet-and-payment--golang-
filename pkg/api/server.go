@@ -1,11 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -77,9 +79,9 @@ func (s *Server) setupRoutes() {
 			authGroup.POST("/logout", s.authMiddleware(), s.handleLogout)
 		}
 
-		// API Keys
+		// API Keys (Requires 'api_keys:manage' scope or admin role)
 		apiKeys := v1.Group("/api-keys")
-		apiKeys.Use(s.authMiddleware(), s.requireRole("admin"))
+		apiKeys.Use(s.authMiddleware(), s.requirePermission("api_keys:manage", "admin"))
 		{
 			apiKeys.POST("", s.handleCreateAPIKey)
 			apiKeys.DELETE("/:id", s.handleRevokeAPIKey)
@@ -89,31 +91,31 @@ func (s *Server) setupRoutes() {
 		wallets := v1.Group("/wallets")
 		wallets.Use(s.authMiddleware())
 		{
-			wallets.POST("", s.requireRole("admin", "finance"), s.handleCreateWallet)
-			wallets.GET("/:id", s.handleGetWallet)
-			wallets.POST("/:id/deposit", s.requireRole("admin", "finance"), s.idempotencyMiddleware(), s.handleDeposit)
-			wallets.GET("/:id/ledger", s.handleGetLedgerEntries)
+			wallets.POST("", s.requirePermission("wallets:write", "admin", "finance"), s.handleCreateWallet)
+			wallets.GET("/:id", s.requirePermission("wallets:read", "admin", "finance", "viewer"), s.handleGetWallet)
+			wallets.POST("/:id/deposit", s.requirePermission("wallets:deposit", "admin", "finance"), s.idempotencyMiddleware(), s.handleDeposit)
+			wallets.GET("/:id/ledger", s.requirePermission("ledger:read", "admin", "finance", "viewer"), s.handleGetLedgerEntries)
 		}
 
 		// Transfers (Saga)
 		transfers := v1.Group("/transfers")
 		transfers.Use(s.authMiddleware())
 		{
-			transfers.POST("", s.requireRole("admin", "finance"), s.idempotencyMiddleware(), s.handleCreateTransfer)
-			transfers.GET("/:id", s.handleGetTransfer)
-			transfers.POST("/:id/reverse", s.requireRole("admin"), s.idempotencyMiddleware(), s.handleReverseTransfer)
+			transfers.POST("", s.requirePermission("transfers:write", "admin", "finance"), s.idempotencyMiddleware(), s.handleCreateTransfer)
+			transfers.GET("/:id", s.requirePermission("transfers:read", "admin", "finance", "viewer"), s.handleGetTransfer)
+			transfers.POST("/:id/reverse", s.requirePermission("transfers:reverse", "admin"), s.idempotencyMiddleware(), s.handleReverseTransfer)
 		}
 
 		// Webhooks
 		webhooks := v1.Group("/webhooks")
-		webhooks.Use(s.authMiddleware(), s.requireRole("admin"))
+		webhooks.Use(s.authMiddleware(), s.requirePermission("webhooks:manage", "admin"))
 		{
 			webhooks.POST("", s.handleRegisterWebhook)
 		}
 
 		// Reconciliation Audit Reports
 		reports := v1.Group("/reports")
-		reports.Use(s.authMiddleware(), s.requireRole("admin", "finance"))
+		reports.Use(s.authMiddleware(), s.requirePermission("reports:read", "admin", "finance"))
 		{
 			reports.GET("/reconciliation", s.handleReconciliationReport)
 		}
@@ -143,7 +145,8 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 			c.Set("organization_id", orgID)
 			c.Set("actor_id", keyID)
 			c.Set("actor_type", "api_key")
-			c.Set("role", "admin") // API keys operate with granted scope
+			c.Set("scopes", scopes)
+			c.Set("role", "api_client") // Do not escalate to admin! Scopes must be checked.
 			c.Next()
 			return
 		}
@@ -171,8 +174,38 @@ func (s *Server) authMiddleware() gin.HandlerFunc {
 	}
 }
 
-func (s *Server) requireRole(roles ...string) gin.HandlerFunc {
+func (s *Server) requirePermission(requiredScope string, allowedRoles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		actorTypeVal, _ := c.Get("actor_type")
+		actorType, _ := actorTypeVal.(string)
+
+		if actorType == "api_key" {
+			scopesVal, exists := c.Get("scopes")
+			if !exists {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient api key scope"})
+				return
+			}
+			scopes, ok := scopesVal.([]string)
+			if !ok {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid api key scopes"})
+				return
+			}
+
+			// Check if required scope or wildcard * or admin scope is present
+			for _, sc := range scopes {
+				if sc == requiredScope || sc == "*" || sc == "admin" {
+					c.Next()
+					return
+				}
+			}
+
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("api key lacks required scope: %s", requiredScope),
+			})
+			return
+		}
+
+		// Human user: check role
 		userRole, _ := c.Get("role")
 		roleStr, ok := userRole.(string)
 		if !ok {
@@ -180,7 +213,7 @@ func (s *Server) requireRole(roles ...string) gin.HandlerFunc {
 			return
 		}
 
-		for _, r := range roles {
+		for _, r := range allowedRoles {
 			if r == roleStr {
 				c.Next()
 				return
@@ -205,7 +238,7 @@ func (s *Server) idempotencyMiddleware() gin.HandlerFunc {
 		orgIDVal, _ := c.Get("organization_id")
 		orgID := orgIDVal.(uuid.UUID)
 
-		// Read and hash the request body
+		// Read, hash, and restore the request body so downstream handlers can parse it
 		var bodyBytes []byte
 		if c.Request.Body != nil {
 			var err error
@@ -214,6 +247,7 @@ func (s *Server) idempotencyMiddleware() gin.HandlerFunc {
 				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "failed to read request body"})
 				return
 			}
+			c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
 
 		hash := sha256.Sum256(bodyBytes)
@@ -276,7 +310,7 @@ type RegisterRequest struct {
 	OrganizationName string `json:"organization_name" binding:"required"`
 	Email            string `json:"email" binding:"required,email"`
 	Password         string `json:"password" binding:"required,min=8"`
-	Role             string `json:"role" binding:"required,oneof=admin finance viewer"`
+	Role             string `json:"role"` // Optional; defaults to 'viewer' unless creating a brand-new organization as founder
 }
 
 func (s *Server) handleRegister(c *gin.Context) {
@@ -299,14 +333,30 @@ func (s *Server) handleRegister(c *gin.Context) {
 	}
 	defer tx.Rollback(c.Request.Context())
 
-	// Create Organization
+	// Check if organization already exists
 	var orgID uuid.UUID
+	var isNewOrg bool
 	err = tx.QueryRow(c.Request.Context(), `
-		INSERT INTO organizations (name) VALUES ($1) RETURNING id
+		SELECT id FROM organizations WHERE name = $1
 	`, req.OrganizationName).Scan(&orgID)
+
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
-		return
+		// Create new Organization: founder receives 'admin' role
+		isNewOrg = true
+		err = tx.QueryRow(c.Request.Context(), `
+			INSERT INTO organizations (name) VALUES ($1) RETURNING id
+		`, req.OrganizationName).Scan(&orgID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
+			return
+		}
+	}
+
+	// Security Policy: Only the initial organization creator gets admin.
+	// Any subsequent public registrant in an existing org is assigned 'viewer' to prevent privilege escalation.
+	assignedRole := "viewer"
+	if isNewOrg {
+		assignedRole = "admin"
 	}
 
 	// Create User
@@ -315,7 +365,7 @@ func (s *Server) handleRegister(c *gin.Context) {
 		INSERT INTO users (organization_id, email, password_hash, role)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id
-	`, orgID, req.Email, pwHash, req.Role).Scan(&userID)
+	`, orgID, req.Email, pwHash, assignedRole).Scan(&userID)
 	if err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
@@ -330,8 +380,9 @@ func (s *Server) handleRegister(c *gin.Context) {
 		"organization_id": orgID,
 		"user_id":         userID,
 		"email":           req.Email,
-		"role":            req.Role,
+		"role":            assignedRole,
 	})
+	return
 }
 
 type LoginRequest struct {
@@ -935,6 +986,18 @@ func (s *Server) handleGetLedgerEntries(c *gin.Context) {
 	walletID, err := uuid.Parse(walletIDStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid wallet id"})
+		return
+	}
+
+	orgID := c.MustGet("organization_id").(uuid.UUID)
+
+	// Verify wallet belongs to the authenticated organization
+	var walletExists bool
+	err = s.db.QueryRow(c.Request.Context(), `
+		SELECT EXISTS(SELECT 1 FROM wallets WHERE id = $1 AND organization_id = $2)
+	`, walletID, orgID).Scan(&walletExists)
+	if err != nil || !walletExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "wallet not found"})
 		return
 	}
 

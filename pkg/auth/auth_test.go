@@ -70,3 +70,27 @@ func TestAPIKeyGenerationAndHashing(t *testing.T) {
 		t.Fatalf("hash mismatch: expected %s, got %s", hash, computedHash)
 	}
 }
+
+func TestJWTTokenValidation_InvalidOrWrongSecret(t *testing.T) {
+	secret := "secret-jwt-key-1"
+	wrongSecret := "secret-jwt-key-2"
+	userID := uuid.New()
+	orgID := uuid.New()
+
+	access, _, _, err := auth.GenerateTokenPair(secret, userID, orgID, "viewer", nil)
+	if err != nil {
+		t.Fatalf("failed generating token: %v", err)
+	}
+
+	// Validate with wrong secret
+	_, err = auth.ValidateToken(wrongSecret, access)
+	if err == nil {
+		t.Fatal("expected token validation to fail when using incorrect secret")
+	}
+
+	// Validate malformed token string
+	_, err = auth.ValidateToken(secret, "malformed.jwt.token")
+	if err == nil {
+		t.Fatal("expected malformed token validation to fail")
+	}
+}

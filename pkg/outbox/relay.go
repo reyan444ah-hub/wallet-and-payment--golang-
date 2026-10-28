@@ -59,7 +59,14 @@ func (r *Relay) StartRelay(ctx context.Context, pollInterval time.Duration) {
 }
 
 func (r *Relay) publishPendingEvents(ctx context.Context) {
-	rows, err := r.db.Query(ctx, `
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		r.logger.Error("failed starting transaction for outbox claim", zap.Error(err))
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, `
 		SELECT id, topic, partition_key, payload, retry_count
 		FROM outbox_events
 		WHERE status = 'PENDING' AND next_retry_at <= NOW()
@@ -87,6 +94,27 @@ func (r *Relay) publishPendingEvents(ctx context.Context) {
 		if err := rows.Scan(&item.ID, &item.Topic, &item.PartitionKey, &item.Payload, &item.RetryCount); err == nil {
 			batch = append(batch, item)
 		}
+	}
+	rows.Close()
+
+	if len(batch) == 0 {
+		return
+	}
+
+	// Atomically mark claimed events as PROCESSING so other concurrent relay workers ignore them
+	claimedIDs := make([]uuid.UUID, len(batch))
+	for i, b := range batch {
+		claimedIDs[i] = b.ID
+	}
+	_, err = tx.Exec(ctx, `UPDATE outbox_events SET status = 'PROCESSING' WHERE id = ANY($1)`, claimedIDs)
+	if err != nil {
+		r.logger.Error("failed marking outbox events as processing", zap.Error(err))
+		return
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		r.logger.Error("failed committing outbox event claims", zap.Error(err))
+		return
 	}
 
 	for _, item := range batch {
