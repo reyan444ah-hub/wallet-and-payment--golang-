@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wallet_test
+      POSTGRES_PASSWORD: wallet_test_only
+      POSTGRES_DB: wallet_test
+    ports:
+      - "127.0.0.1:${TEST_POSTGRES_PORT:-55439}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wallet_test -d wallet_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:${TEST_REDIS_PORT:-6389}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "127.0.0.1:${TEST_NATS_PORT:-54229}:4222"
+      - "127.0.0.1:${TEST_NATS_MONITOR_PORT:-18229}:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8222/healthz"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

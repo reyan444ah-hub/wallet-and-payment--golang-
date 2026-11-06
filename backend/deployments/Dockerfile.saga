@@ -1,0 +1,29 @@
+FROM golang:1.26-alpine AS builder
+ENV GOTOOLCHAIN=auto
+RUN apk add --no-cache git protobuf protobuf-dev
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12 && \
+    go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Haath wali fake stub hata kar asli protobuf code generate karo
+RUN rm -f proto/risk/v1/risk_grpc.pb.go proto/risk/v1/risk.pb.go && \
+    protoc -I . \
+      --go_out=. --go_opt=module=github.com/distributed-wallet/platform \
+      --go-grpc_out=. --go-grpc_opt=module=github.com/distributed-wallet/platform \
+      proto/risk/v1/risk.proto
+
+RUN mkdir -p /out && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
+    -o /out/saga ./cmd/saga-orchestrator
+
+FROM alpine:3.22
+RUN apk add --no-cache ca-certificates && \
+    addgroup -S app && adduser -S -G app app
+WORKDIR /app
+COPY --from=builder --chown=app:app /out/saga ./saga
+USER app
+ENTRYPOINT ["./saga"]

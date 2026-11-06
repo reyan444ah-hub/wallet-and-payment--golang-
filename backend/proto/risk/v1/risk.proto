@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package risk.v1;
+
+option go_package = "github.com/distributed-wallet/platform/proto/risk/v1;riskv1";
+
+service RiskService {
+  rpc EvaluateTransferRisk (EvaluateRiskRequest) returns (EvaluateRiskResponse);
+}
+
+message EvaluateRiskRequest {
+  string transfer_id = 1;
+  string organization_id = 2;
+  string source_wallet_id = 3;
+  string destination_wallet_id = 4;
+  int64 amount = 5;
+  string currency = 6;
+  string destination_organization_id = 7;
+}
+
+enum RiskDecision {
+  RISK_DECISION_UNSPECIFIED = 0;
+  RISK_DECISION_APPROVED = 1;
+  RISK_DECISION_REJECTED = 2;
+}
+
+message EvaluateRiskResponse {
+  RiskDecision decision = 1;
+  string reason = 2;
+  int32 risk_score = 3; // 0 to 100
+}
